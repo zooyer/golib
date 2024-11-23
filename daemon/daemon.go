@@ -2,26 +2,22 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"slices"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/zooyer/golib/xos"
 )
 
-const envOrphan = "GOLIB_ORPHAN_PROCESS"
+const (
+	envProcessName    = "GLIB_PROCESS_NAME"    // 原始进程名
+	envProcessDaemon  = "GLIB_PROCESS_DAEMON"  // 守护进程标识
+	envProcessRunning = "GLIB_PROCESS_RUNNING" // 运行标识符
+)
 
-var args = slices.Clone(os.Args)
-
-func init() {
-	for i, arg := range args {
-		args[i] = strings.Clone(arg)
-	}
-}
+const defaultDaemonSuffix = "(glib/daemon)"
 
 func exit() {
 	if testing.Testing() {
@@ -31,50 +27,30 @@ func exit() {
 	os.Exit(0)
 }
 
-// 孤儿进程
-func isOrphan() bool {
-	return os.Getppid() == 1 || os.Getenv(envOrphan) == "true"
-}
-
-// 守护进程(非linux守护进程，这里指本代码的守护进程)
-func isDaemon(env string) bool {
-	return os.Getenv(env) == ""
-}
-
-func fork() (proc *os.Process, err error) {
+func fork(envs []string, args ...string) (proc *os.Process, err error) {
 	// 当前程序的路径
 	name, err := os.Executable()
 	if err != nil {
 		return
 	}
 
-	var (
-		envs = os.Environ()
-		attr = os.ProcAttr{
-			Dir: "",   // 继承工作目录
-			Env: envs, // 继承环境变量
-			Sys: nil,  // 不设置进程属性
-			Files: []*os.File{
-				os.Stdin,  // 标准输入
-				os.Stdout, // 标准输出
-				os.Stderr, // 标准错误
-			}, // 继承文件描述符
-		}
-	)
+	var attr = os.ProcAttr{
+		Dir: "",   // 继承工作目录
+		Env: envs, // 继承环境变量
+		Sys: nil,  // 不设置进程属性
+		Files: []*os.File{
+			os.Stdin,  // 标准输入
+			os.Stdout, // 标准输出
+			os.Stderr, // 标准错误
+		}, // 继承文件描述符
+	}
 
 	return os.StartProcess(name, args, &attr)
 }
 
-func orphan(dup bool) (err error) {
-	// TODO 这里防止子进程启动时，父进程还没退出，判断孤儿进程失败
-	//time.Sleep(time.Second)
-
-	// 孤儿进程当做linux守护进程
-	if isOrphan() {
-		if err = os.Unsetenv(envOrphan); err != nil {
-			return
-		}
-
+func daemon(dup bool) (err error) {
+	// 守护进程
+	if isDaemon() {
 		// 创建新会话
 		if _, err = syscall.Setsid(); err != nil {
 			return
@@ -129,44 +105,59 @@ func orphan(dup bool) (err error) {
 		return
 	}
 
-	// 设置孤儿进程环境变量
-	if err = os.Setenv(envOrphan, "true"); err != nil {
+	var (
+		proc *os.Process
+		envs = os.Environ()
+		args = slices.Clone(os.Args)
+	)
+
+	// 设置进程名
+	args[0] = fmt.Sprintf("%s%s", os.Args[0], defaultDaemonSuffix)
+	envs = append(envs, fmt.Sprintf("%s=%s", envProcessName, os.Args[0]))
+
+	// 设置进程标识
+	envs = append(envs, fmt.Sprintf("%s=1", envProcessDaemon))
+
+	// 启动守护进程
+	if proc, err = fork(envs, args...); err != nil {
 		return
 	}
 
-	var proc *os.Process
-	if proc, err = fork(); err != nil {
-		return
-	}
-
-	// TODO 这里启动子进程并释放后退出，不是原子操作
-	// TODO 可能子进程启动快，导致子进程判断还不是孤儿进程，导致递归fork
-	// TODO 可以在判断前isOrphan增加延时解决
-	// TODO 原生fork不会出现这个问题
+	// 释放子进程资源管理权（交给操作系统清理）
 	if err = proc.Release(); err != nil {
 		return
 	}
 
-	// TODO 这里直接退出，子进程会启动失败，需要延迟退出
-	time.Sleep(time.Second * 10)
+	// 这里直接退出，子进程会启动失败，需要延迟退出
+	for {
+		time.Sleep(time.Second)
+
+		if _, err = os.FindProcess(proc.Pid); err == nil {
+			break
+		}
+	}
 
 	exit()
 
 	return
 }
 
-func rename(name string) {
-	xos.SetProcessName(name)
-}
+func start() (err error) {
+	var (
+		envs = os.Environ()
+		args = slices.Clone(os.Args)
+	)
 
-func start(env string) (err error) {
-	// 设置非守护进程环境变量
-	if err = os.Setenv(env, "true"); err != nil {
-		return
+	// 运行中
+	envs = append(envs, fmt.Sprintf("%s=1", envProcessRunning))
+
+	// 还原进程名
+	if name := os.Getenv(envProcessName); name != "" {
+		args[0] = name
 	}
 
 	// 启动子进程
-	proc, err := fork()
+	proc, err := fork(envs, args...)
 	if err != nil {
 		return
 	}
@@ -185,23 +176,39 @@ func start(env string) (err error) {
 	return
 }
 
-func daemon(name, env string, dup, always bool) (err error) {
-	// 1. 非守护进程
-	if !isDaemon(env) {
+// 孤儿进程
+func isDaemon() bool {
+	// 这里防止子进程启动时，父进程还没退出，ppid还是父进程的，判断守护进程失败，采用传递环境变量，可以同步取到值
+	//time.Sleep(time.Second)
+	//return os.Getppid() == 1
+
+	return os.Getenv(envProcessDaemon) == "1"
+}
+
+// 运行中
+func isRunning() bool {
+	return os.Getenv(envProcessRunning) == "1"
+}
+
+// Daemon initializes a process to run as a daemon.
+// Params:
+//   - dup: Duplicate standard file descriptors.
+//   - always: Specifies whether the daemon should always run.
+func Daemon(dup, always bool) (err error) {
+	// 1. 已运行
+	if isRunning() {
 		return
 	}
 
-	// 2. 启动孤儿进程
-	if err = orphan(dup); err != nil {
+	// 2. 守护进程
+
+	if err = daemon(dup); err != nil {
 		log.Println(err)
 	}
 
-	// 3. 修改进程名
-	rename(name)
-
-	// 4. 启动守护进程
+	// 3. 守护进程运行中
 	for {
-		if err = start(env); err != nil {
+		if err = start(); err != nil {
 			log.Println(err)
 		}
 
@@ -212,16 +219,4 @@ func daemon(name, env string, dup, always bool) (err error) {
 
 		time.Sleep(time.Second)
 	}
-}
-
-// Daemon initializes a process to run as a daemon.
-// Parameters:
-//   - name: The name of the daemon process.
-//   - env: The environment configuration for the daemon process.
-//   - dup: Indicates whether file descriptors should be duplicated.
-//   - always: Specifies whether the daemon should always run.
-//     -- true: The child process will be restarted when it exits, regardless of the exit status code.
-//     -- false: If the child process exits with a status code other than 0, restart.
-func Daemon(name, env string, dup, always bool) (err error) {
-	return daemon(name, env, dup, always)
 }

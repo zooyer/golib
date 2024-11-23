@@ -17,7 +17,7 @@ const (
 	envProcessRunning = "GLIB_PROCESS_RUNNING" // 运行标识符
 )
 
-const defaultDaemonSuffix = "(glib/daemon)"
+const daemonSuffix = "(glib/daemon)"
 
 func exit() {
 	if testing.Testing() {
@@ -112,7 +112,7 @@ func daemon(dup bool) (err error) {
 	)
 
 	// 设置进程名
-	args[0] = fmt.Sprintf("%s%s", os.Args[0], defaultDaemonSuffix)
+	args[0] = fmt.Sprintf("%s%s", os.Args[0], daemonSuffix)
 	envs = append(envs, fmt.Sprintf("%s=%s", envProcessName, os.Args[0]))
 
 	// 设置进程标识

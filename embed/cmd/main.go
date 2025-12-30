@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/zooyer/golib/embed"
+	"golib/embed"
 )
 
 type Command string

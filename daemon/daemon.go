@@ -53,12 +53,12 @@ func daemon(dup bool) (err error) {
 	if isDaemon() {
 		// 创建新会话
 		if _, err = syscall.Setsid(); err != nil {
-			return
+			return fmt.Errorf("could not set sid: %w", err)
 		}
 
 		// 改变工作目录
 		if err = os.Chdir("/"); err != nil {
-			return
+			return fmt.Errorf("could not chdir: %w", err)
 		}
 
 		// 改变文件访问权限掩码
@@ -67,34 +67,34 @@ func daemon(dup bool) (err error) {
 		if dup {
 			// 关闭stdin、stdout、stderr
 			if err = os.Stdin.Close(); err != nil {
-				return
+				return fmt.Errorf("could not close stdin: %w", err)
 			}
 
 			if err = os.Stdout.Close(); err != nil {
-				return
+				return fmt.Errorf("could not close stdout: %w", err)
 			}
 
 			if err = os.Stderr.Close(); err != nil {
-				return
+				return fmt.Errorf("could not close stderr: %w", err)
 			}
 
 			// 打开/dev/null
 			var null *os.File
 			if null, err = os.OpenFile(os.DevNull, os.O_RDWR, 0); err != nil {
-				return
+				return fmt.Errorf("could not open null file: %w", err)
 			}
 
 			// 重定向stdin、stdout、stderr到/dev/null
 			if err = syscall.Dup2(int(null.Fd()), int(os.Stdin.Fd())); err != nil {
-				return
+				return fmt.Errorf("could not dup stdin file: %w", err)
 			}
 
 			if err = syscall.Dup2(int(null.Fd()), int(os.Stdout.Fd())); err != nil {
-				return
+				return fmt.Errorf("could not dup stdout file: %w", err)
 			}
 
 			if err = syscall.Dup2(int(null.Fd()), int(os.Stderr.Fd())); err != nil {
-				return
+				return fmt.Errorf("could not dup stderr file: %w", err)
 			}
 
 			os.Stdin = null
@@ -201,7 +201,6 @@ func Daemon(dup, always bool) (err error) {
 	}
 
 	// 2. 守护进程
-
 	if err = daemon(dup); err != nil {
 		log.Println(err)
 	}

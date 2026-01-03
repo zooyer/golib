@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"golib/daemon"
+	"github.com/zooyer/golib/daemon"
 )
 
 func init() {
